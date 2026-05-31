@@ -1,22 +1,25 @@
-import sys
-import traceback
 import datetime
 import faulthandler
+import sys
+import traceback
+
 from PySide6.QtWidgets import QApplication, QMessageBox
+
 from visao.controllers.main_controller import MainController
 from visao.utils.logger import logger
+
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     print("ERRO CRÍTICO ENCONTRADO:\n", error_msg, file=sys.stderr)
-    
+
     try:
         with open("crash.log", "a", encoding="utf-8") as f:
             f.write(f"\n--- Crash at {datetime.datetime.now()} ---\n")
             f.write(error_msg)
     except:
         pass
-        
+
     try:
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Critical)
@@ -27,6 +30,7 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     except:
         pass
 
+
 def main():
     logger.init_log()
     logger.log("=== APP START ===")
@@ -34,7 +38,7 @@ def main():
         faulthandler.enable(f_err)
     sys.excepthook = global_exception_handler
     app = QApplication(sys.argv)
-    
+
     # Nome da Aplicação
     app.setApplicationName("V.I.S.A.O")
     app.setApplicationVersion("1.0.0")
@@ -43,6 +47,7 @@ def main():
     controller.start()
 
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

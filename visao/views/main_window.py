@@ -422,9 +422,18 @@ class MainWindow(QMainWindow):
     def _do_grab_and_update_spectator(self):
         self._spectator_update_pending = False
         if self.stacked_widget.currentIndex() == 1:
-            # Sem o OpenGL, o .grab() do viewport é perfeitamente seguro e rápido
-            pixmap = self.canvas.viewport().grab()
-            self.controller.update_spectator_view(pixmap)
+            try:
+                from PySide6.QtGui import QPixmap, QPainter
+                from PySide6.QtCore import Qt
+                pixmap = QPixmap(self.canvas.viewport().size())
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                self.canvas.render(painter)
+                painter.end()
+                self.controller.update_spectator_view(pixmap)
+            except Exception as e:
+                from visao.utils.logger import logger
+                logger.log(f"MainWindow._do_grab_and_update_spectator: ERRO {e}")
 
     def on_verdict(self, verdict):
         QMessageBox.information(self, "Veredito", f"O Veredito Final é:\n{verdict}")
