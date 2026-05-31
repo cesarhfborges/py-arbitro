@@ -28,7 +28,8 @@ def get_player_polygons(image_np):
         return polygons_out
         
     # Run inference. verbose=False disables the print outputs per image.
-    results = model(image_np, verbose=False)
+    # Usamos conf=0.1 para conseguir detectar jogadores muito pequenos em imagens de campo aberto.
+    results = model(image_np, verbose=False, conf=0.1)
     
     if not results or not results[0].masks:
         return polygons_out

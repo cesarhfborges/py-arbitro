@@ -4,6 +4,7 @@ import datetime
 import faulthandler
 from PySide6.QtWidgets import QApplication, QMessageBox
 from visao.controllers.main_controller import MainController
+from visao.utils.logger import logger
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
@@ -27,6 +28,8 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
         pass
 
 def main():
+    logger.init_log()
+    logger.log("=== APP START ===")
     with open("crash_c.log", "w") as f_err:
         faulthandler.enable(f_err)
     sys.excepthook = global_exception_handler

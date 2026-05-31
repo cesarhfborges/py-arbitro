@@ -1,9 +1,9 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QPushButton, QFileDialog, QMessageBox, QStackedWidget,
                                QSlider, QLabel, QApplication, QRadioButton, QCheckBox, QColorDialog,
-                               QDialog, QMenuBar)
+                               QDialog, QMenuBar, QProgressDialog)
 from PySide6.QtGui import QAction, QIcon
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 class ConfirmDialog(QDialog):
     def __init__(self, parent, title, text):
@@ -180,6 +180,11 @@ class MainWindow(QMainWindow):
         self.chk_vis_d.toggled.connect(lambda v: self.on_visibility_changed('d', v))
         self.step3_layout.addWidget(self.chk_vis_d)
         
+        self.chk_show_mask = QCheckBox("Exibir Jogadores Detectados")
+        self.chk_show_mask.setChecked(False)
+        self.chk_show_mask.toggled.connect(self.on_show_mask_toggled)
+        self.step3_layout.addWidget(self.chk_show_mask)
+        
         # Espessura
         lbl_thick = QLabel("Espessura (Ambas)")
         # pyrefly: ignore [missing-attribute]
@@ -289,7 +294,9 @@ class MainWindow(QMainWindow):
                 self.controller.multi_window = None
 
     def on_open_media(self):
-        filepath, _ = QFileDialog.getOpenFileName(self, "Selecionar Mídia", "", 
+        from pathlib import Path
+        downloads_path = str(Path.home() / "Downloads")
+        filepath, _ = QFileDialog.getOpenFileName(self, "Selecionar Mídia", downloads_path, 
                                                   "Imagens e Vídeos (*.png *.jpg *.jpeg *.mp4 *.avi)")
         if filepath:
             self.controller.load_media(filepath)
@@ -363,6 +370,30 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(pixmap)
         self.on_step_changed(self.steps_panel.current_step)
 
+    def advance_to_stage_3_async(self):
+        self.loading_dialog = QProgressDialog("Calculando perspectiva tridimensional...", None, 0, 0, self)
+        self.loading_dialog.setWindowTitle("Aguarde")
+        self.loading_dialog.setWindowModality(Qt.WindowModal)
+        self.loading_dialog.setCancelButton(None)
+        self.loading_dialog.show()
+        
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(100, self._do_setup_stage_3)
+        
+    def _do_setup_stage_3(self):
+        try:
+            self.canvas.setup_stage_3(
+                self.state.settings["attacker_line_color"],
+                self.state.settings["defender_line_color"]
+            )
+            self.update_movable_line()
+            self.on_thickness_changed(self.slider_thick.value())
+        except Exception as e:
+            print(f"Erro ao configurar etapa 3: {e}")
+        finally:
+            if hasattr(self, 'loading_dialog'):
+                self.loading_dialog.close()
+
     def on_step_changed(self, step):
         if step == 2:
             self.step3_controls.hide()
@@ -371,12 +402,7 @@ class MainWindow(QMainWindow):
         elif step == 3:
             self.step2_controls.hide()
             self.step3_controls.show()
-            self.canvas.setup_stage_3(
-                self.state.settings["attacker_line_color"],
-                self.state.settings["defender_line_color"]
-            )
-            self.update_movable_line()
-            self.on_thickness_changed(self.slider_thick.value())
+            self.advance_to_stage_3_async()
         else:
             self.step2_controls.hide()
             self.step3_controls.hide()
@@ -455,13 +481,19 @@ class MainWindow(QMainWindow):
             self.state.save_settings()
             self.on_canvas_updated()
 
-    def on_visibility_changed(self, line_type, visible):
-        if line_type == 'a' and self.canvas.line_a:
+    def on_visibility_changed(self, line_id, visible):
+        if line_id == 'a' and self.canvas.line_a:
             self.canvas.line_a.is_visible = visible
             self.canvas.line_a.update()
-        elif line_type == 'd' and self.canvas.line_d:
+            self.on_canvas_updated()
+        elif line_id == 'd' and self.canvas.line_d:
             self.canvas.line_d.is_visible = visible
             self.canvas.line_d.update()
+            self.on_canvas_updated()
+
+    def on_show_mask_toggled(self, checked):
+        self.canvas.show_player_mask = checked
+        self.canvas.scene.update()
         self.on_canvas_updated()
 
     def on_thickness_changed(self, value):
