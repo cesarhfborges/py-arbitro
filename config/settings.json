@@ -1,7 +1,7 @@
 {
     "theme": "auto",
-    "attacker_line_color": "#33ff0f",
-    "defender_line_color": "#0000FF",
+    "attacker_line_color": "#ff0000",
+    "defender_line_color": "#00ff00",
     "logo_path": "",
     "multi_window_enabled": false
 }

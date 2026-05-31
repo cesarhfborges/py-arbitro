@@ -1,8 +1,21 @@
 import cv2
 import numpy as np
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsItem
-from PySide6.QtCore import Qt, QPointF, Signal, QRectF
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QPainterPath
+from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QObject
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QPainterPath, QImage, QPolygonF
+from visao.utils.segmentation import get_player_polygons
+import threading
+
+class SegmentationWorker(QObject):
+    finished_polys = Signal(list)
+
+def _run_segmentation(worker, image_np):
+    try:
+        polys = get_player_polygons(image_np)
+        worker.finished_polys.emit(polys)
+    except Exception as e:
+        print(f"Erro na segmentação: {e}")
+        worker.finished_polys.emit([])
 
 class QuadrilateralItem(QGraphicsItem):
     def __init__(self, points):
@@ -87,7 +100,10 @@ class PerspectiveCross(QGraphicsItem):
     def __init__(self, start_pos, H, img_rect, color_hex, canvas):
         super().__init__()
         self.H = H
-        self.H_inv = np.linalg.inv(H) if H is not None else None
+        try:
+            self.H_inv = np.linalg.inv(H) if H is not None else None
+        except:
+            self.H_inv = None
         self.img_rect = img_rect
         self.color = QColor(color_hex)
         self.canvas = canvas
@@ -111,13 +127,21 @@ class PerspectiveCross(QGraphicsItem):
         
     # pyrefly: ignore [bad-override]
     def paint(self, painter, option, widget):
-        if not self.is_visible or self.H is None:
+        if not self.is_visible or self.H is None or self.H_inv is None:
             return
             
-        painter.save()
-        if self.img_rect:
-            painter.setClipRect(self.img_rect)
+        if not self.img_rect: return
             
+        rect = self.img_rect.toRect()
+        if rect.width() <= 0 or rect.height() <= 0: return
+        
+        # Offscreen buffer
+        line_pixmap = QPixmap(rect.size())
+        line_pixmap.fill(Qt.transparent)
+        off_painter = QPainter(line_pixmap)
+        off_painter.setRenderHint(QPainter.Antialiasing)
+        off_painter.translate(-self.img_rect.topLeft())
+        
         pc = self.center_pt
         
         # Mapear Pc para o espaço de mundo (World)
@@ -135,19 +159,22 @@ class PerspectiveCross(QGraphicsItem):
         w_line2 = np.array([[[wx, 0], [wx, 10000]]], dtype=np.float32)
         s_line2 = cv2.perspectiveTransform(w_line2, self.H)[0]
         
-        painter.setPen(QPen(self.color, self.thickness))
+        off_painter.setPen(QPen(self.color, self.thickness))
         
-        # Desenhar cruz projetada
         # Como as extremidades são arbitrárias (0 a 10000), podemos simplificar desenhando retas longas.
         # Em vez disso, traçamos uma reta bem longa a partir dos pontos calculados:
         def draw_infinite_line(p1, p2):
+            import math
+            if math.isnan(p1[0]) or math.isinf(p1[0]) or math.isnan(p1[1]) or math.isinf(p1[1]): return
+            if math.isnan(p2[0]) or math.isinf(p2[0]) or math.isnan(p2[1]) or math.isinf(p2[1]): return
             dx = p2[0] - p1[0]
             dy = p2[1] - p1[1]
             if dx == 0 and dy == 0: return
+            
             path = QPainterPath()
             path.moveTo(p1[0] - dx*100, p1[1] - dy*100)
             path.lineTo(p2[0] + dx*100, p2[1] + dy*100)
-            painter.drawPath(path)
+            off_painter.drawPath(path)
             
         draw_infinite_line(s_line1[0], s_line1[1])
         draw_infinite_line(s_line2[0], s_line2[1])
@@ -158,10 +185,20 @@ class PerspectiveCross(QGraphicsItem):
         # pyrefly: ignore [missing-attribute]
         pen.setStyle(Qt.CustomDashLine)
         pen.setDashPattern([float(self.dash_spacing), float(self.dash_spacing)])
-        painter.setPen(pen)
-        painter.drawLine(pc.x(), pc.y(), pc.x(), pc.y() - self.height_val)
+        off_painter.setPen(pen)
         
-        painter.restore()
+        off_painter.drawLine(pc.x(), pc.y(), pc.x(), pc.y() - self.height_val)
+        
+        off_painter.end()
+        
+        # Apply mask
+        if hasattr(self.canvas, 'player_mask_pixmap') and self.canvas.player_mask_pixmap:
+            mask_painter = QPainter(line_pixmap)
+            mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+            mask_painter.drawPixmap(0, 0, self.canvas.player_mask_pixmap)
+            mask_painter.end()
+            
+        painter.drawPixmap(self.img_rect.topLeft(), line_pixmap)
 
     def mousePressEvent(self, event):
         # Permite mover apenas se a flag ItemIsMovable estiver ativa
@@ -225,6 +262,8 @@ class CanvasView(QGraphicsView):
         self.line_d = None
         self.H = None
         self.homography_line_thickness = 3
+        self.player_mask_pixmap = None
+        self.seg_thread = None
 
     def set_image(self, pixmap: QPixmap):
         # pyrefly: ignore [missing-attribute]
@@ -233,6 +272,7 @@ class CanvasView(QGraphicsView):
         self.quad = None
         self.line_a = None
         self.line_d = None
+        self.player_mask_pixmap = None
         
         # pyrefly: ignore [missing-attribute]
         self.current_pixmap_item = self.scene.addPixmap(pixmap)
@@ -245,6 +285,54 @@ class CanvasView(QGraphicsView):
         self.base_scale = self.transform().m11()
         if self.base_scale <= 0:
             self.base_scale = 1.0
+            
+        # Iniciar a segmentação em background
+        try:
+            image = pixmap.toImage()
+            image = image.convertToFormat(QImage.Format_RGB888)
+            width = image.width()
+            height = image.height()
+            bpl = image.bytesPerLine()
+            ptr = image.constBits()
+            # Lida com o padding da QImage (bytesPerLine) e cria uma CÓPIA 
+            # para que a thread não acesse memória desalocada quando QImage sumir
+            arr = np.array(ptr, dtype=np.uint8).reshape(height, bpl)
+            arr = arr[:, :width * 3].reshape(height, width, 3).copy()
+            
+            self.seg_worker = SegmentationWorker()
+            self.seg_worker.finished_polys.connect(self.on_segmentation_finished)
+            self.seg_thread = threading.Thread(target=_run_segmentation, args=(self.seg_worker, arr))
+            self.seg_thread.daemon = True
+            self.seg_thread.start()
+        except Exception as e:
+            print(f"Erro ao iniciar thread de segmentacao: {e}")
+
+    def on_segmentation_finished(self, polys):
+        if not self.current_pixmap_item: return
+        rect = self.current_pixmap_item.boundingRect().toRect()
+        if rect.width() <= 0 or rect.height() <= 0: return
+        
+        mask_pixmap = QPixmap(rect.size())
+        mask_pixmap.fill(Qt.transparent)
+        
+        painter = QPainter(mask_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(0, 0, 0, 255))
+        painter.setPen(Qt.NoPen)
+        
+        path = QPainterPath()
+        for poly in polys:
+            qpoly = QPolygonF()
+            for pt in poly:
+                qpoly.append(QPointF(pt[0], pt[1]))
+            path.addPolygon(qpoly)
+            
+        painter.drawPath(path)
+        painter.end()
+        
+        self.player_mask_pixmap = mask_pixmap
+        self.viewer_updated.emit()
+        self.scene.update()
 
     def wheelEvent(self, event):
         # Ignora zoom do mouse, controlado pelo slider agora
